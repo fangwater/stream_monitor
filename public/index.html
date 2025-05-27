@@ -1,0 +1,359 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>加密货币数据流监控</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .status.running {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.stopped {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .chart-container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin: 20px 0;
+        }
+        .signal-list {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .signal-item {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .signal-item:last-child {
+            border-bottom: none;
+        }
+        .connections-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background-color: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .connections-table th, .connections-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        .connections-table th {
+            background-color: #f8f9fa;
+            font-weight: bold;
+        }
+        .connections-table tr:hover {
+            background-color: #f5f5f5;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        .status-indicator.running {
+            background-color: #28a745;
+        }
+        .status-indicator.stopped {
+            background-color: #dc3545;
+        }
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .chart-wrapper {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .chart-title {
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>加密货币数据流监控</h1>
+        <div id="status" class="status">连接中...</div>
+        
+        <table class="connections-table">
+            <thead>
+                <tr>
+                    <th>交易所</th>
+                    <th>频道</th>
+                    <th>状态</th>
+                    <th>消息速率</th>
+                    <th>带宽</th>
+                </tr>
+            </thead>
+            <tbody id="connectionsTableBody">
+            </tbody>
+        </table>
+
+        <div id="chartsContainer" class="chart-grid">
+            <!-- 图表将通过JavaScript动态添加 -->
+        </div>
+        
+        <div class="signal-list">
+            <h2>最近信号</h2>
+            <div id="signalList"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script>
+        // 存储图表实例
+        const charts = {};
+        
+        // 创建图表
+        function createChart(exchange, channel) {
+            const chartId = `chart-${exchange}-${channel}`;
+            const chartWrapper = document.createElement('div');
+            chartWrapper.className = 'chart-wrapper';
+            chartWrapper.innerHTML = `
+                <div class="chart-title">${exchange} - ${channel}</div>
+                <div id="${chartId}" style="height: 300px;"></div>
+            `;
+            document.getElementById('chartsContainer').appendChild(chartWrapper);
+            
+            const chart = echarts.init(document.getElementById(chartId));
+            charts[`${exchange}-${channel}`] = chart;
+            
+            return chart;
+        }
+        
+        // 更新图表
+        function updateCharts(data) {
+            const now = new Date();
+            const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000);
+            
+            // 过滤最近30分钟的数据
+            const recentData = {
+                timestamps: [],
+                exchanges: {}
+            };
+            
+            // 过滤时间戳
+            data.history.timestamps.forEach((ts, index) => {
+                const timestamp = new Date(ts);
+                if (timestamp >= thirtyMinutesAgo) {
+                    recentData.timestamps.push(ts);
+                    
+                    // 同时过滤每个交易所的数据
+                    Object.keys(data.history.exchanges).forEach(exchange => {
+                        if (!recentData.exchanges[exchange]) {
+                            recentData.exchanges[exchange] = {};
+                        }
+                        
+                        ['inc', 'trade'].forEach(channel => {
+                            if (data.history.exchanges[exchange][channel]) {
+                                if (!recentData.exchanges[exchange][channel]) {
+                                    recentData.exchanges[exchange][channel] = {
+                                        msgRates: [],
+                                        bytesPerSec: []
+                                    };
+                                }
+                                recentData.exchanges[exchange][channel].msgRates.push(
+                                    data.history.exchanges[exchange][channel].msgRates[index]
+                                );
+                                recentData.exchanges[exchange][channel].bytesPerSec.push(
+                                    data.history.exchanges[exchange][channel].bytesPerSec[index]
+                                );
+                            }
+                        });
+                    });
+                }
+            });
+
+            const timestamps = recentData.timestamps.map(ts => {
+                const date = new Date(ts);
+                return date.toLocaleTimeString();
+            });
+            
+            // 处理每个交易所的数据
+            for (const [exchange, exchangeData] of Object.entries(recentData.exchanges)) {
+                for (const channel of ['inc', 'trade']) {
+                    if (exchangeData[channel]) {
+                        const stats = exchangeData[channel];
+                        const chartKey = `${exchange}-${channel}`;
+                        
+                        // 如果图表不存在，创建新的图表
+                        if (!charts[chartKey]) {
+                            createChart(exchange, channel);
+                        }
+                        
+                        const chart = charts[chartKey];
+                        
+                        // 准备数据
+                        const msgRateData = stats.msgRates;
+                        const bytesData = stats.bytesPerSec.map(bytes => 
+                            ((bytes || 0) * 8) / (1024 * 1024) // 转换为Mbps
+                        );
+                        
+                        // 设置图表选项
+                        const option = {
+                            tooltip: {
+                                trigger: 'axis',
+                                axisPointer: {
+                                    type: 'cross'
+                                }
+                            },
+                            legend: {
+                                data: ['消息速率', '带宽'],
+                                bottom: 0
+                            },
+                            grid: {
+                                left: '3%',
+                                right: '4%',
+                                bottom: '15%',
+                                containLabel: true
+                            },
+                            xAxis: {
+                                type: 'category',
+                                data: timestamps
+                            },
+                            yAxis: [
+                                {
+                                    type: 'value',
+                                    name: '消息/秒',
+                                    axisLabel: {
+                                        formatter: function(value) {
+                                            return formatNumber(value);
+                                        }
+                                    }
+                                },
+                                {
+                                    type: 'value',
+                                    name: 'Mbps',
+                                    axisLabel: {
+                                        formatter: function(value) {
+                                            return value.toFixed(2) + ' Mbps';
+                                        }
+                                    }
+                                }
+                            ],
+                            series: [
+                                {
+                                    name: '消息速率',
+                                    type: 'line',
+                                    data: msgRateData,
+                                    smooth: true,
+                                    showSymbol: false
+                                },
+                                {
+                                    name: '带宽',
+                                    type: 'line',
+                                    yAxisIndex: 1,
+                                    data: bytesData,
+                                    smooth: true,
+                                    showSymbol: false
+                                }
+                            ]
+                        };
+                        
+                        chart.setOption(option);
+                    }
+                }
+            }
+        }
+
+        // 更新连接表格
+        function updateConnectionsTable(data) {
+            const tbody = document.getElementById('connectionsTableBody');
+            tbody.innerHTML = '';
+            
+            for (const [exchange, channels] of Object.entries(data.current.exchanges)) {
+                for (const [channel, stats] of Object.entries(channels)) {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${exchange}</td>
+                        <td>${channel}</td>
+                        <td>
+                            <span class="status-indicator ${stats.status}"></span>
+                            ${stats.status}
+                        </td>
+                        <td>${formatNumber(stats.msg_rate)} 消息/秒</td>
+                        <td>${formatBytes(stats.bytes_per_sec)}</td>
+                    `;
+                    tbody.appendChild(row);
+                }
+            }
+        }
+
+        // 格式化数字
+        function formatNumber(num) {
+            return new Intl.NumberFormat().format(num);
+        }
+
+        // 格式化字节数
+        function formatBytes(bytes) {
+            const mbps = (bytes * 8) / (1024 * 1024); // 转换为Mbps
+            return mbps.toFixed(2) + ' Mbps';
+        }
+
+        // 更新信号列表
+        function updateSignalList(signals) {
+            const signalList = document.getElementById('signalList');
+            signalList.innerHTML = signals.map(signal => 
+                `<div class="signal-item">
+                    <strong>${signal.type}</strong> (${signal.exchange} - ${signal.channel}) - ${signal.time}
+                </div>`
+            ).join('');
+        }
+
+        // 连接WebSocket
+        const ws = new WebSocket('ws://' + window.location.host + '/ws/metrics');
+
+        ws.onopen = () => {
+            document.getElementById('status').textContent = '已连接';
+            document.getElementById('status').className = 'status running';
+        };
+
+        // WebSocket 消息处理
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            updateConnectionsTable(data);
+            updateSignalList(data.history.signals);
+            updateCharts(data);
+        };
+
+        ws.onclose = () => {
+            document.getElementById('status').textContent = '断开连接';
+            document.getElementById('status').className = 'status stopped';
+        };
+
+        // 窗口大小改变时调整图表大小
+        window.addEventListener('resize', () => {
+            Object.values(charts).forEach(chart => chart.resize());
+        });
+    </script>
+</body>
+</html>
