@@ -33,6 +33,14 @@ chown -R "$USER_NAME":"$USER_NAME" "$ARCHIVE_DIR"
 echo "正在安装依赖..."
 npm install ws express
 
+# 创建日志管理脚本
+LOG_MANAGER_SCRIPT="$WORKING_DIR/manage_logs.sh"
+cat > "$LOG_MANAGER_SCRIPT" <<'EOF'
+#!/bin/bash
+
+LOG_DIR="/var/log/monitor"
+ARCHIVE_DIR="$(pwd)/logs"
+
 # 日志管理函数
 manage_logs() {
     # 获取当前时间戳
@@ -51,6 +59,13 @@ manage_logs() {
     fi
 }
 
+manage_logs
+EOF
+
+# 设置日志管理脚本权限
+chmod +x "$LOG_MANAGER_SCRIPT"
+chown "$USER_NAME":"$USER_NAME" "$LOG_MANAGER_SCRIPT"
+
 # 创建定时重启服务
 TIMER_NAME="${SERVICE_NAME}-restart"
 TIMER_FILE="/etc/systemd/system/${TIMER_NAME}.timer"
@@ -64,7 +79,7 @@ Description=Restart Monitor Service Daily
 [Service]
 Type=oneshot
 ExecStart=/bin/systemctl restart ${SERVICE_NAME}.service
-ExecStartPost=/bin/bash -c '$(declare -f manage_logs); manage_logs'
+ExecStartPost=$LOG_MANAGER_SCRIPT
 EOF
 
 # 创建定时器文件
@@ -94,7 +109,7 @@ After=network.target
 User=$USER_NAME
 WorkingDirectory=$WORKING_DIR
 ExecStart=$NODE_PATH $MONITOR_SCRIPT
-ExecStartPre=/bin/bash -c '$(declare -f manage_logs); manage_logs'
+ExecStartPre=$LOG_MANAGER_SCRIPT
 Restart=always
 RestartSec=5
 StandardOutput=file:$LOG_DIR/output.log
