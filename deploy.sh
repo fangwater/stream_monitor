@@ -20,8 +20,8 @@ USER_NAME=$(logname)                    # 当前登录用户（非root）
 WORKING_DIR=$(pwd)                      # 脚本所在目录
 NODE_PATH=$(which node)                 # Node.js 路径
 MONITOR_SCRIPT="monitor.js"             # 你的监控脚本
-LOG_DIR="/var/log/$SERVICE_NAME"        # 日志目录
-ARCHIVE_DIR="$WORKING_DIR/logs"         # 日志归档目录（改为当前目录下的logs文件夹）
+LOG_DIR="$WORKING_DIR"        # 日志目录
+ARCHIVE_DIR="$WORKING_DIR"         # 日志归档目录（改为当前目录下的logs文件夹）
 
 # 创建必要的目录
 mkdir -p "$LOG_DIR"
