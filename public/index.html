@@ -90,6 +90,7 @@
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            height: 400px;
         }
         .chart-title {
             font-size: 16px;
@@ -104,233 +105,132 @@
         <h1>加密货币数据流监控</h1>
         <div id="status" class="status">连接中...</div>
         
-        <table class="connections-table">
-            <thead>
-                <tr>
-                    <th>交易所</th>
-                    <th>频道</th>
-                    <th>状态</th>
-                    <th>消息速率</th>
-                    <th>带宽</th>
-                </tr>
-            </thead>
-            <tbody id="connectionsTableBody">
-            </tbody>
-        </table>
+        <!-- 总带宽图表 -->
+        <div class="chart-wrapper">
+            <div class="chart-title">总带宽（所有流累加）</div>
+            <div id="total-bandwidth-chart" style="width: 100%; height: 350px;"></div>
+        </div>
 
-        <div id="chartsContainer" class="chart-grid">
-            <!-- 图表将通过JavaScript动态添加 -->
-        </div>
-        
-        <div class="signal-list">
-            <h2>最近信号</h2>
-            <div id="signalList"></div>
-        </div>
+        <!-- 各stream速率图表 -->
+        <div id="streamChartsContainer" class="chart-grid"></div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <script>
         // 存储图表实例
-        const charts = {};
-        
-        // 创建图表
-        function createChart(exchange, channel) {
+        const streamCharts = {};
+        let totalBandwidthChart = null;
+
+        // 创建stream速率图表
+        function createStreamChart(exchange, channel) {
             const chartId = `chart-${exchange}-${channel}`;
             const chartWrapper = document.createElement('div');
             chartWrapper.className = 'chart-wrapper';
             chartWrapper.innerHTML = `
-                <div class="chart-title">${exchange} - ${channel}</div>
-                <div id="${chartId}" style="height: 300px;"></div>
+                <div class="chart-title">${exchange} - ${channel} 消息速率</div>
+                <div id="${chartId}" style="width: 100%; height: 350px;"></div>
             `;
-            document.getElementById('chartsContainer').appendChild(chartWrapper);
-            
+            document.getElementById('streamChartsContainer').appendChild(chartWrapper);
             const chart = echarts.init(document.getElementById(chartId));
-            charts[`${exchange}-${channel}`] = chart;
-            
+            streamCharts[`${exchange}-${channel}`] = chart;
             return chart;
         }
-        
-        // 更新图表
-        function updateCharts(data) {
-            const now = new Date();
-            const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000);
-            
-            // 过滤最近30分钟的数据
-            const recentData = {
-                timestamps: [],
-                exchanges: {}
-            };
-            
-            // 过滤时间戳
-            data.history.timestamps.forEach((ts, index) => {
-                const timestamp = new Date(ts);
-                if (timestamp >= thirtyMinutesAgo) {
-                    recentData.timestamps.push(ts);
-                    
-                    // 同时过滤每个交易所的数据
-                    Object.keys(data.history.exchanges).forEach(exchange => {
-                        if (!recentData.exchanges[exchange]) {
-                            recentData.exchanges[exchange] = {};
-                        }
-                        
-                        ['inc', 'trade'].forEach(channel => {
-                            if (data.history.exchanges[exchange][channel]) {
-                                if (!recentData.exchanges[exchange][channel]) {
-                                    recentData.exchanges[exchange][channel] = {
-                                        msgRates: [],
-                                        bytesPerSec: []
-                                    };
-                                }
-                                recentData.exchanges[exchange][channel].msgRates.push(
-                                    data.history.exchanges[exchange][channel].msgRates[index]
-                                );
-                                recentData.exchanges[exchange][channel].bytesPerSec.push(
-                                    data.history.exchanges[exchange][channel].bytesPerSec[index]
-                                );
-                            }
-                        });
-                    });
-                }
-            });
 
-            const timestamps = recentData.timestamps.map(ts => {
-                const date = new Date(ts);
-                return date.toLocaleTimeString();
-            });
-            
-            // 处理每个交易所的数据
-            for (const [exchange, exchangeData] of Object.entries(recentData.exchanges)) {
-                for (const channel of ['inc', 'trade']) {
-                    if (exchangeData[channel]) {
-                        const stats = exchangeData[channel];
-                        const chartKey = `${exchange}-${channel}`;
-                        
-                        // 如果图表不存在，创建新的图表
-                        if (!charts[chartKey]) {
-                            createChart(exchange, channel);
-                        }
-                        
-                        const chart = charts[chartKey];
-                        
-                        // 准备数据
-                        const msgRateData = stats.msgRates;
-                        const bytesData = stats.bytesPerSec.map(bytes => 
-                            ((bytes || 0) * 8) / (1024 * 1024) // 转换为Mbps
-                        );
-                        
-                        // 设置图表选项
-                        const option = {
-                            tooltip: {
-                                trigger: 'axis',
-                                axisPointer: {
-                                    type: 'cross'
-                                }
-                            },
-                            legend: {
-                                data: ['消息速率', '带宽'],
-                                bottom: 0
-                            },
-                            grid: {
-                                left: '3%',
-                                right: '4%',
-                                bottom: '15%',
-                                containLabel: true
-                            },
-                            xAxis: {
-                                type: 'category',
-                                data: timestamps
-                            },
-                            yAxis: [
-                                {
-                                    type: 'value',
-                                    name: '消息/秒',
-                                    axisLabel: {
-                                        formatter: function(value) {
-                                            return formatNumber(value);
-                                        }
-                                    }
-                                },
-                                {
-                                    type: 'value',
-                                    name: 'Mbps',
-                                    axisLabel: {
-                                        formatter: function(value) {
-                                            return value.toFixed(2) + ' Mbps';
-                                        }
-                                    }
-                                }
-                            ],
-                            series: [
-                                {
-                                    name: '消息速率',
-                                    type: 'line',
-                                    data: msgRateData,
-                                    smooth: true,
-                                    showSymbol: false
-                                },
-                                {
-                                    name: '带宽',
-                                    type: 'line',
-                                    yAxisIndex: 1,
-                                    data: bytesData,
-                                    smooth: true,
-                                    showSymbol: false
-                                }
-                            ]
-                        };
-                        
-                        chart.setOption(option);
+        // 创建总带宽图表
+        function createTotalBandwidthChart() {
+            totalBandwidthChart = echarts.init(document.getElementById('total-bandwidth-chart'));
+        }
+
+        // 更新stream速率图表
+        function updateStreamCharts(data) {
+            if (!data || !data.history || !data.history.exchanges) return;
+            const timestamps = data.history.timestamps || [];
+            const signals = (data.history.signals || []).filter(s => s.type && s.type !== 'periodic');
+            for (const [exchange, channels] of Object.entries(data.history.exchanges)) {
+                for (const [channel, stats] of Object.entries(channels)) {
+                    const chartKey = `${exchange}-${channel}`;
+                    if (!streamCharts[chartKey]) {
+                        createStreamChart(exchange, channel);
+                    }
+                    const chart = streamCharts[chartKey];
+                    // 消息速率数据
+                    const msgRates = stats.msgRates || [];
+                    // 标记signal点
+                    const markPoints = signals.filter(s => s.exchange === exchange && s.channel === channel).map(s => ({
+                        name: s.type,
+                        value: s.type,
+                        xAxis: timestamps.indexOf(s.time),
+                        yAxis: msgRates[timestamps.indexOf(s.time)] || 0,
+                        itemStyle: { color: s.type === 'SIGINT' ? 'red' : 'orange' }
+                    }));
+                    const option = {
+                        tooltip: { trigger: 'axis' },
+                        grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+                        xAxis: {
+                            type: 'category',
+                            data: timestamps.map(ts => new Date(ts).toLocaleTimeString()),
+                            axisLabel: { rotate: 45 }
+                        },
+                        yAxis: {
+                            type: 'value',
+                            name: '消息/秒',
+                            axisLabel: { formatter: v => v }
+                        },
+                        series: [{
+                            name: '消息速率',
+                            type: 'line',
+                            data: msgRates,
+                            smooth: true,
+                            showSymbol: false,
+                            markPoint: { data: markPoints }
+                        }]
+                    };
+                    chart.setOption(option);
+                }
+            }
+        }
+
+        // 更新总带宽图表
+        function updateTotalBandwidthChart(data) {
+            if (!data || !data.history || !data.history.exchanges) return;
+            const timestamps = data.history.timestamps || [];
+            // 累加所有stream的bytesPerSec
+            const totalBytes = timestamps.map((_, idx) => {
+                let sum = 0;
+                for (const channels of Object.values(data.history.exchanges)) {
+                    for (const stats of Object.values(channels)) {
+                        sum += stats.bytesPerSec[idx] || 0;
                     }
                 }
-            }
-        }
-
-        // 更新连接表格
-        function updateConnectionsTable(data) {
-            const tbody = document.getElementById('connectionsTableBody');
-            tbody.innerHTML = '';
-            
-            for (const [exchange, channels] of Object.entries(data.current.exchanges)) {
-                for (const [channel, stats] of Object.entries(channels)) {
-                    const row = document.createElement('tr');
-                    row.innerHTML = `
-                        <td>${exchange}</td>
-                        <td>${channel}</td>
-                        <td>
-                            <span class="status-indicator ${stats.status}"></span>
-                            ${stats.status}
-                        </td>
-                        <td>${formatNumber(stats.msg_rate)} 消息/秒</td>
-                        <td>${formatBytes(stats.bytes_per_sec)}</td>
-                    `;
-                    tbody.appendChild(row);
-                }
-            }
-        }
-
-        // 格式化数字
-        function formatNumber(num) {
-            return new Intl.NumberFormat().format(num);
-        }
-
-        // 格式化字节数
-        function formatBytes(bytes) {
-            const mbps = (bytes * 8) / (1024 * 1024); // 转换为Mbps
-            return mbps.toFixed(2) + ' Mbps';
-        }
-
-        // 更新信号列表
-        function updateSignalList(signals) {
-            const signalList = document.getElementById('signalList');
-            signalList.innerHTML = signals.map(signal => 
-                `<div class="signal-item">
-                    <strong>${signal.type}</strong> (${signal.exchange} - ${signal.channel}) - ${signal.time}
-                </div>`
-            ).join('');
+                return sum;
+            });
+            const mbps = totalBytes.map(b => (b * 8) / (1024 * 1024));
+            const option = {
+                tooltip: { trigger: 'axis' },
+                grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+                xAxis: {
+                    type: 'category',
+                    data: timestamps.map(ts => new Date(ts).toLocaleTimeString()),
+                    axisLabel: { rotate: 45 }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: '总带宽(Mbps)',
+                    axisLabel: { formatter: v => v.toFixed(2) }
+                },
+                series: [{
+                    name: '总带宽',
+                    type: 'line',
+                    data: mbps,
+                    smooth: true,
+                    showSymbol: false
+                }]
+            };
+            totalBandwidthChart.setOption(option);
         }
 
         // 连接WebSocket
-        const ws = new WebSocket('ws://' + window.location.host + '/ws/metrics');
+        const ws = new WebSocket('ws://' + window.location.hostname + ':3001/ws/metrics');
 
         ws.onopen = () => {
             document.getElementById('status').textContent = '已连接';
@@ -339,10 +239,15 @@
 
         // WebSocket 消息处理
         ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            updateConnectionsTable(data);
-            updateSignalList(data.history.signals);
-            updateCharts(data);
+            try {
+                const data = JSON.parse(event.data);
+                if (!totalBandwidthChart) createTotalBandwidthChart();
+                updateTotalBandwidthChart(data);
+                updateStreamCharts(data);
+            } catch (error) {
+                console.error('处理WebSocket消息时出错:', error);
+                console.error('原始消息:', event.data);
+            }
         };
 
         ws.onclose = () => {
@@ -352,8 +257,14 @@
 
         // 窗口大小改变时调整图表大小
         window.addEventListener('resize', () => {
-            Object.values(charts).forEach(chart => chart.resize());
+            Object.values(streamCharts).forEach(chart => chart.resize());
         });
+
+        ws.onerror = (error) => {
+            console.error('WebSocket 连接错误:', error);
+            document.getElementById('status').textContent = '连接错误';
+            document.getElementById('status').className = 'status stopped';
+        };
     </script>
 </body>
 </html>

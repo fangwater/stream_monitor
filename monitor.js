@@ -5,16 +5,25 @@ const os = require('os');
 const fs = require('fs');
 
 const app = express();
-const port = 3000;
+const HTTP_PORT = 3000;
+const WS_PORT = 3001;
+const MAX_WS_CONNECTIONS = 10; // 最大WebSocket连接数限制
 
 // 数据文件路径
 const DATA_FILE = path.join(__dirname, 'data', 'history.json');
-const LOG_FILE = path.join(__dirname, 'data', 'metrics.log');
+const LOG_DIR = path.join(__dirname, 'data', 'logs');
 
-// 确保数据目录存在
+// 确保数据目录和日志目录存在
 if (!fs.existsSync(path.join(__dirname, 'data'))) {
     fs.mkdirSync(path.join(__dirname, 'data'));
 }
+if (!fs.existsSync(LOG_DIR)) {
+    fs.mkdirSync(LOG_DIR);
+}
+
+// 创建新的日志文件，使用日期作为文件名
+const currentDate = new Date().toISOString().split('T')[0];
+const LOG_FILE = path.join(LOG_DIR, `metrics_${currentDate}.log`);
 
 // 获取本机IP地址
 function getLocalIP() {
@@ -27,10 +36,11 @@ function getLocalIP() {
             }
         }
     }
-    return '0.0.0.0'; // 如果找不到合适的IP，使用0.0.0.0
+    return '0.0.0.0'; // 如果找不到合适的IP，监听所有接口
 }
 
 const localIP = getLocalIP();
+console.log(`本机IP地址: ${localIP}`);
 
 // 循环缓冲区类
 class CircularBuffer {
@@ -67,11 +77,9 @@ class CircularBuffer {
     }
 }
 
-// 存储历史数据
-const MAX_DATA_POINTS = 60*4; // 保存最近4分钟的数据点（15秒一个点）
-const MAX_WS_CONNECTIONS = 10; // 最大WebSocket连接数
-const MAX_LOG_SIZE = 10 * 1024 * 1024; // 最大日志文件大小（10MB）
-const SUBMIT_INTERVAL = 15000; // 15秒提交一次数据
+// 修改数据点数量计算
+const MINUTES_TO_KEEP = 10; // 保存10分钟的数据
+const MAX_DATA_POINTS = 40; // 10分钟，每15秒一个点，约40个点
 
 let historyData = {
     timestamps: new CircularBuffer(MAX_DATA_POINTS),
@@ -79,10 +87,11 @@ let historyData = {
     signals: new CircularBuffer(5) // 只保留最近5个信号
 };
 
-// 存储临时数据
-let tempData = {
-    exchanges: {}, // {exchange: {channel: {msgCount: 0, bytesCount: 0, lastUpdate: timestamp}}}
-};
+// 存储最新数据的对象
+let currentExchangeData = {};
+
+// 添加初始化标志
+let isInitialized = false;
 
 // 加载历史数据
 function loadHistoryData() {
@@ -162,16 +171,6 @@ function saveHistoryData() {
 // 记录指标到日志
 function logMetrics(stats) {
     try {
-        // 检查日志文件大小
-        if (fs.existsSync(LOG_FILE)) {
-            const stats = fs.statSync(LOG_FILE);
-            if (stats.size > MAX_LOG_SIZE) {
-                // 如果日志文件过大，创建新的日志文件
-                const backupFile = LOG_FILE + '.' + new Date().toISOString().replace(/[:.]/g, '-');
-                fs.renameSync(LOG_FILE, backupFile);
-            }
-        }
-        
         const logEntry = JSON.stringify({
             timestamp: new Date().toISOString(),
             ...stats
@@ -182,315 +181,20 @@ function logMetrics(stats) {
     }
 }
 
-// 创建 HTTP 服务器
-const server = app.listen(port, '0.0.0.0', () => {
-    console.log(`监控服务器运行在 http://${localIP}:${port}`);
-});
-
-// 创建 WebSocket 服务器
-const wss = new WebSocket.Server({ 
-    server,
-    path: '/ws/metrics'
-});
-
-// 加载历史数据
-loadHistoryData();
-
-// 初始化临时数据
-function initTempData(exchange, channel) {
-    if (!tempData.exchanges[exchange]) {
-        tempData.exchanges[exchange] = {};
-    }
-    if (!tempData.exchanges[exchange][channel]) {
-        tempData.exchanges[exchange][channel] = {
-            msgCount: 0,
-            bytesCount: 0,
-            lastUpdate: Date.now()
-        };
-    }
-}
-
-// 更新临时数据
-function updateTempData(exchange, channel, msgSize) {
-    initTempData(exchange, channel);
-    const data = tempData.exchanges[exchange][channel];
-    data.msgCount++;
-    data.bytesCount += msgSize;
-}
-
-// 计算速率并提交数据
-function submitData() {
-    const now = Date.now();
-    const timestamp = new Date(now).toISOString();
-    
-    // 添加时间戳
-    historyData.timestamps.push(timestamp);
-    
-    // 处理每个交易所的数据
-    Object.keys(tempData.exchanges).forEach(exchange => {
-        Object.keys(tempData.exchanges[exchange]).forEach(channel => {
-            const data = tempData.exchanges[exchange][channel];
-            const timeDiff = (now - data.lastUpdate) / 1000; // 转换为秒
-            
-            // 计算速率
-            const msgRate = Math.round(data.msgCount / timeDiff);
-            const bytesPerSec = Math.round(data.bytesCount / timeDiff);
-            
-            // 确保exchanges对象存在
-            if (!historyData.exchanges[exchange]) {
-                historyData.exchanges[exchange] = {
-                    "trade": {
-                        msgRates: new CircularBuffer(MAX_DATA_POINTS),
-                        bytesPerSec: new CircularBuffer(MAX_DATA_POINTS)
-                    },
-                    "inc": {
-                        msgRates: new CircularBuffer(MAX_DATA_POINTS),
-                        bytesPerSec: new CircularBuffer(MAX_DATA_POINTS)
-                    }
-                };
-            }
-            
-            // 确保channel对象存在
-            if (!historyData.exchanges[exchange][channel]) {
-                historyData.exchanges[exchange][channel] = {
-                    msgRates: new CircularBuffer(MAX_DATA_POINTS),
-                    bytesPerSec: new CircularBuffer(MAX_DATA_POINTS)
-                };
-            }
-            
-            // 添加数据
-            historyData.exchanges[exchange][channel].msgRates.push(msgRate);
-            historyData.exchanges[exchange][channel].bytesPerSec.push(bytesPerSec);
-            
-            // 准备发送给客户端的数据
-            const currentData = {
-                history: {
-                    timestamps: historyData.timestamps.getData(),
-                    exchanges: {},
-                    signals: historyData.signals.getData()
-                },
-                current: {
-                    exchanges: {}
-                }
-            };
-            
-            // 转换交易所数据
-            Object.keys(historyData.exchanges).forEach(ex => {
-                currentData.history.exchanges[ex] = {};
-                Object.keys(historyData.exchanges[ex]).forEach(ch => {
-                    currentData.history.exchanges[ex][ch] = {
-                        msgRates: historyData.exchanges[ex][ch].msgRates.getData(),
-                        bytesPerSec: historyData.exchanges[ex][ch].bytesPerSec.getData()
-                    };
-                });
-            });
-            
-            // 添加当前数据
-            if (!currentData.current.exchanges[exchange]) {
-                currentData.current.exchanges[exchange] = {};
-            }
-            currentData.current.exchanges[exchange][channel] = {
-                msg_rate: msgRate,
-                bytes_per_sec: bytesPerSec,
-                status: 'running',
-                signal_type: 'periodic'
-            };
-            
-            // 广播更新给所有客户端
-            wss.clients.forEach(client => {
-                if (client.readyState === WebSocket.OPEN) {
-                    try {
-                        client.send(JSON.stringify(currentData));
-                    } catch (error) {
-                        console.error('发送数据到客户端失败:', error);
-                    }
-                }
-            });
-            
-            console.log('成功处理统计数据:', {
-                exchange,
-                channel,
-                msgRate,
-                bytesPerSec,
-                status: 'running'
-            });
-            
-            // 重置计数器
-            data.msgCount = 0;
-            data.bytesCount = 0;
-            data.lastUpdate = now;
-        });
-    });
-}
-
-// 定期提交数据
-setInterval(submitData, SUBMIT_INTERVAL);
-
-// WebSocket 连接处理
-wss.on('connection', (ws) => {
-    // 检查连接数量限制
-    if (wss.clients.size > MAX_WS_CONNECTIONS) {
-        ws.close(1008, '达到最大连接数限制');
-        return;
-    }
-    
-    console.log('新的监控客户端连接');
-
-    // 发送当前状态给新连接的客户端
-    ws.send(JSON.stringify({
-        history: historyData,
-        current: {
-            exchanges: {}
-        }
-    }));
-
-    // 设置心跳检测
-    const heartbeat = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.ping();
-        }
-    }, 30000);
-
-    ws.on('pong', () => {
-        // 收到 pong 响应，连接正常
-    });
-
-    ws.on('message', (message) => {
-        try {
-            const stats = JSON.parse(message);
-            if (!stats.exchange || !stats.channel) {
-                console.error('消息缺少必要字段:', stats);
-                return;
-            }
-
-            const exchange = stats.exchange.toString();
-            const channel = stats.channel.toString();
-            
-            // 记录指标到日志
-            logMetrics(stats);
-            
-            // 更新历史数据
-            const timestamp = new Date(stats.timestamp).toISOString();
-            
-            // 添加时间戳
-            historyData.timestamps.push(timestamp);
-            
-            // 确保exchanges对象存在
-            if (!historyData.exchanges[exchange]) {
-                historyData.exchanges[exchange] = {
-                    "trade": {
-                        msgRates: new CircularBuffer(MAX_DATA_POINTS),
-                        bytesPerSec: new CircularBuffer(MAX_DATA_POINTS)
-                    },
-                    "inc": {
-                        msgRates: new CircularBuffer(MAX_DATA_POINTS),
-                        bytesPerSec: new CircularBuffer(MAX_DATA_POINTS)
-                    }
-                };
-            }
-            
-            // 确保channel对象存在
-            if (!historyData.exchanges[exchange][channel]) {
-                historyData.exchanges[exchange][channel] = {
-                    msgRates: new CircularBuffer(MAX_DATA_POINTS),
-                    bytesPerSec: new CircularBuffer(MAX_DATA_POINTS)
-                };
-            }
-            
-            // 将15秒的数据转换为每秒的速率
-            const msgRate = Math.round((stats.msg_sec || 0) / 15);
-            const bytesPerSec = Math.round((stats.bytes_sec || 0) / 15);
-            
-            historyData.exchanges[exchange][channel].msgRates.push(msgRate);
-            historyData.exchanges[exchange][channel].bytesPerSec.push(bytesPerSec);
-
-            // 如果收到信号，添加到信号列表
-            if (stats.signal_type && stats.signal_type !== 'periodic') {
-                historyData.signals.push({
-                    time: timestamp,
-                    type: stats.signal_type,
-                    exchange: exchange,
-                    channel: channel
-                });
-            }
-
-            // 准备发送给客户端的数据
-            const currentData = {
-                history: {
-                    timestamps: historyData.timestamps.getData(),
-                    exchanges: {},
-                    signals: historyData.signals.getData()
-                },
-                current: {
-                    exchanges: {}
-                }
-            };
-
-            // 转换交易所数据
-            Object.keys(historyData.exchanges).forEach(ex => {
-                currentData.history.exchanges[ex] = {};
-                Object.keys(historyData.exchanges[ex]).forEach(ch => {
-                    currentData.history.exchanges[ex][ch] = {
-                        msgRates: historyData.exchanges[ex][ch].msgRates.getData(),
-                        bytesPerSec: historyData.exchanges[ex][ch].bytesPerSec.getData()
-                    };
-                });
-            });
-
-            // 添加当前数据
-            if (!currentData.current.exchanges[exchange]) {
-                currentData.current.exchanges[exchange] = {};
-            }
-            currentData.current.exchanges[exchange][channel] = {
-                msg_rate: msgRate,
-                bytes_per_sec: bytesPerSec,
-                status: stats.status || 'running',
-                signal_type: stats.signal_type || 'periodic'
-            };
-
-            // 广播更新给所有客户端
-            wss.clients.forEach(client => {
-                if (client.readyState === WebSocket.OPEN) {
-                    try {
-                        client.send(JSON.stringify(currentData));
-                    } catch (error) {
-                        console.error('发送数据到客户端失败:', error);
-                    }
-                }
-            });
-
-            console.log('成功处理统计数据:', {
-                exchange,
-                channel,
-                msgRate,
-                bytesPerSec,
-                status: stats.status || 'running'
-            });
-        } catch (error) {
-            console.error('解析消息失败:', error);
-            console.error('原始消息:', message.toString());
-        }
-    });
-
-    ws.on('close', () => {
-        console.log('监控客户端断开连接');
-        clearInterval(heartbeat);
-    });
-
-    ws.on('error', (error) => {
-        console.error('WebSocket 错误:', error);
-        clearInterval(heartbeat);
-    });
-});
-
 // 提供静态文件
 app.use(express.static(path.join(__dirname, 'public')));
 
+// 添加根路由处理
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 // 创建 public 目录
-if (!fs.existsSync('public')) {
-    fs.mkdirSync('public');
+if (!fs.existsSync(path.join(__dirname, 'public'))) {
+    fs.mkdirSync(path.join(__dirname, 'public'));
 }
 
+// 创建前端页面
 const htmlContent = `
 <!DOCTYPE html>
 <html>
@@ -583,6 +287,7 @@ const htmlContent = `
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            height: 400px;
         }
         .chart-title {
             font-size: 16px;
@@ -597,233 +302,132 @@ const htmlContent = `
         <h1>加密货币数据流监控</h1>
         <div id="status" class="status">连接中...</div>
         
-        <table class="connections-table">
-            <thead>
-                <tr>
-                    <th>交易所</th>
-                    <th>频道</th>
-                    <th>状态</th>
-                    <th>消息速率</th>
-                    <th>带宽</th>
-                </tr>
-            </thead>
-            <tbody id="connectionsTableBody">
-            </tbody>
-        </table>
+        <!-- 总带宽图表 -->
+        <div class="chart-wrapper">
+            <div class="chart-title">总带宽（所有流累加）</div>
+            <div id="total-bandwidth-chart" style="width: 100%; height: 350px;"></div>
+        </div>
 
-        <div id="chartsContainer" class="chart-grid">
-            <!-- 图表将通过JavaScript动态添加 -->
-        </div>
-        
-        <div class="signal-list">
-            <h2>最近信号</h2>
-            <div id="signalList"></div>
-        </div>
+        <!-- 各stream速率图表 -->
+        <div id="streamChartsContainer" class="chart-grid"></div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <script>
         // 存储图表实例
-        const charts = {};
-        
-        // 创建图表
-        function createChart(exchange, channel) {
+        const streamCharts = {};
+        let totalBandwidthChart = null;
+
+        // 创建stream速率图表
+        function createStreamChart(exchange, channel) {
             const chartId = \`chart-\${exchange}-\${channel}\`;
             const chartWrapper = document.createElement('div');
             chartWrapper.className = 'chart-wrapper';
             chartWrapper.innerHTML = \`
-                <div class="chart-title">\${exchange} - \${channel}</div>
-                <div id="\${chartId}" style="height: 300px;"></div>
+                <div class="chart-title">\${exchange} - \${channel} 消息速率</div>
+                <div id="\${chartId}" style="width: 100%; height: 350px;"></div>
             \`;
-            document.getElementById('chartsContainer').appendChild(chartWrapper);
-            
+            document.getElementById('streamChartsContainer').appendChild(chartWrapper);
             const chart = echarts.init(document.getElementById(chartId));
-            charts[\`\${exchange}-\${channel}\`] = chart;
-            
+            streamCharts[\`\${exchange}-\${channel}\`] = chart;
             return chart;
         }
-        
-        // 更新图表
-        function updateCharts(data) {
-            const now = new Date();
-            const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000);
-            
-            // 过滤最近30分钟的数据
-            const recentData = {
-                timestamps: [],
-                exchanges: {}
-            };
-            
-            // 过滤时间戳
-            data.history.timestamps.forEach((ts, index) => {
-                const timestamp = new Date(ts);
-                if (timestamp >= thirtyMinutesAgo) {
-                    recentData.timestamps.push(ts);
-                    
-                    // 同时过滤每个交易所的数据
-                    Object.keys(data.history.exchanges).forEach(exchange => {
-                        if (!recentData.exchanges[exchange]) {
-                            recentData.exchanges[exchange] = {};
-                        }
-                        
-                        ['inc', 'trade'].forEach(channel => {
-                            if (data.history.exchanges[exchange][channel]) {
-                                if (!recentData.exchanges[exchange][channel]) {
-                                    recentData.exchanges[exchange][channel] = {
-                                        msgRates: [],
-                                        bytesPerSec: []
-                                    };
-                                }
-                                recentData.exchanges[exchange][channel].msgRates.push(
-                                    data.history.exchanges[exchange][channel].msgRates[index]
-                                );
-                                recentData.exchanges[exchange][channel].bytesPerSec.push(
-                                    data.history.exchanges[exchange][channel].bytesPerSec[index]
-                                );
-                            }
-                        });
-                    });
-                }
-            });
 
-            const timestamps = recentData.timestamps.map(ts => {
-                const date = new Date(ts);
-                return date.toLocaleTimeString();
-            });
-            
-            // 处理每个交易所的数据
-            for (const [exchange, exchangeData] of Object.entries(recentData.exchanges)) {
-                for (const channel of ['inc', 'trade']) {
-                    if (exchangeData[channel]) {
-                        const stats = exchangeData[channel];
-                        const chartKey = \`\${exchange}-\${channel}\`;
-                        
-                        // 如果图表不存在，创建新的图表
-                        if (!charts[chartKey]) {
-                            createChart(exchange, channel);
-                        }
-                        
-                        const chart = charts[chartKey];
-                        
-                        // 准备数据
-                        const msgRateData = stats.msgRates;
-                        const bytesData = stats.bytesPerSec.map(bytes => 
-                            ((bytes || 0) * 8) / (1024 * 1024) // 转换为Mbps
-                        );
-                        
-                        // 设置图表选项
-                        const option = {
-                            tooltip: {
-                                trigger: 'axis',
-                                axisPointer: {
-                                    type: 'cross'
-                                }
-                            },
-                            legend: {
-                                data: ['消息速率', '带宽'],
-                                bottom: 0
-                            },
-                            grid: {
-                                left: '3%',
-                                right: '4%',
-                                bottom: '15%',
-                                containLabel: true
-                            },
-                            xAxis: {
-                                type: 'category',
-                                data: timestamps
-                            },
-                            yAxis: [
-                                {
-                                    type: 'value',
-                                    name: '消息/秒',
-                                    axisLabel: {
-                                        formatter: function(value) {
-                                            return formatNumber(value);
-                                        }
-                                    }
-                                },
-                                {
-                                    type: 'value',
-                                    name: 'Mbps',
-                                    axisLabel: {
-                                        formatter: function(value) {
-                                            return value.toFixed(2) + ' Mbps';
-                                        }
-                                    }
-                                }
-                            ],
-                            series: [
-                                {
-                                    name: '消息速率',
-                                    type: 'line',
-                                    data: msgRateData,
-                                    smooth: true,
-                                    showSymbol: false
-                                },
-                                {
-                                    name: '带宽',
-                                    type: 'line',
-                                    yAxisIndex: 1,
-                                    data: bytesData,
-                                    smooth: true,
-                                    showSymbol: false
-                                }
-                            ]
-                        };
-                        
-                        chart.setOption(option);
+        // 创建总带宽图表
+        function createTotalBandwidthChart() {
+            totalBandwidthChart = echarts.init(document.getElementById('total-bandwidth-chart'));
+        }
+
+        // 更新stream速率图表
+        function updateStreamCharts(data) {
+            if (!data || !data.history || !data.history.exchanges) return;
+            const timestamps = data.history.timestamps || [];
+            const signals = (data.history.signals || []).filter(s => s.type && s.type !== 'periodic');
+            for (const [exchange, channels] of Object.entries(data.history.exchanges)) {
+                for (const [channel, stats] of Object.entries(channels)) {
+                    const chartKey = \`\${exchange}-\${channel}\`;
+                    if (!streamCharts[chartKey]) {
+                        createStreamChart(exchange, channel);
+                    }
+                    const chart = streamCharts[chartKey];
+                    // 消息速率数据
+                    const msgRates = stats.msgRates || [];
+                    // 标记signal点
+                    const markPoints = signals.filter(s => s.exchange === exchange && s.channel === channel).map(s => ({
+                        name: s.type,
+                        value: s.type,
+                        xAxis: timestamps.indexOf(s.time),
+                        yAxis: msgRates[timestamps.indexOf(s.time)] || 0,
+                        itemStyle: { color: s.type === 'SIGINT' ? 'red' : 'orange' }
+                    }));
+                    const option = {
+                        tooltip: { trigger: 'axis' },
+                        grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+                        xAxis: {
+                            type: 'category',
+                            data: timestamps.map(ts => new Date(ts).toLocaleTimeString()),
+                            axisLabel: { rotate: 45 }
+                        },
+                        yAxis: {
+                            type: 'value',
+                            name: '消息/秒',
+                            axisLabel: { formatter: v => v }
+                        },
+                        series: [{
+                            name: '消息速率',
+                            type: 'line',
+                            data: msgRates,
+                            smooth: true,
+                            showSymbol: false,
+                            markPoint: { data: markPoints }
+                        }]
+                    };
+                    chart.setOption(option);
+                }
+            }
+        }
+
+        // 更新总带宽图表
+        function updateTotalBandwidthChart(data) {
+            if (!data || !data.history || !data.history.exchanges) return;
+            const timestamps = data.history.timestamps || [];
+            // 累加所有stream的bytesPerSec
+            const totalBytes = timestamps.map((_, idx) => {
+                let sum = 0;
+                for (const channels of Object.values(data.history.exchanges)) {
+                    for (const stats of Object.values(channels)) {
+                        sum += stats.bytesPerSec[idx] || 0;
                     }
                 }
-            }
-        }
-
-        // 更新连接表格
-        function updateConnectionsTable(data) {
-            const tbody = document.getElementById('connectionsTableBody');
-            tbody.innerHTML = '';
-            
-            for (const [exchange, channels] of Object.entries(data.current.exchanges)) {
-                for (const [channel, stats] of Object.entries(channels)) {
-                    const row = document.createElement('tr');
-                    row.innerHTML = \`
-                        <td>\${exchange}</td>
-                        <td>\${channel}</td>
-                        <td>
-                            <span class="status-indicator \${stats.status}"></span>
-                            \${stats.status}
-                        </td>
-                        <td>\${formatNumber(stats.msg_rate)} 消息/秒</td>
-                        <td>\${formatBytes(stats.bytes_per_sec)}</td>
-                    \`;
-                    tbody.appendChild(row);
-                }
-            }
-        }
-
-        // 格式化数字
-        function formatNumber(num) {
-            return new Intl.NumberFormat().format(num);
-        }
-
-        // 格式化字节数
-        function formatBytes(bytes) {
-            const mbps = (bytes * 8) / (1024 * 1024); // 转换为Mbps
-            return mbps.toFixed(2) + ' Mbps';
-        }
-
-        // 更新信号列表
-        function updateSignalList(signals) {
-            const signalList = document.getElementById('signalList');
-            signalList.innerHTML = signals.map(signal => 
-                \`<div class="signal-item">
-                    <strong>\${signal.type}</strong> (\${signal.exchange} - \${signal.channel}) - \${signal.time}
-                </div>\`
-            ).join('');
+                return sum;
+            });
+            const mbps = totalBytes.map(b => (b * 8) / (1024 * 1024));
+            const option = {
+                tooltip: { trigger: 'axis' },
+                grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+                xAxis: {
+                    type: 'category',
+                    data: timestamps.map(ts => new Date(ts).toLocaleTimeString()),
+                    axisLabel: { rotate: 45 }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: '总带宽(Mbps)',
+                    axisLabel: { formatter: v => v.toFixed(2) }
+                },
+                series: [{
+                    name: '总带宽',
+                    type: 'line',
+                    data: mbps,
+                    smooth: true,
+                    showSymbol: false
+                }]
+            };
+            totalBandwidthChart.setOption(option);
         }
 
         // 连接WebSocket
-        const ws = new WebSocket('ws://' + window.location.host + '/ws/metrics');
+        const ws = new WebSocket('ws://' + window.location.hostname + ':${WS_PORT}/ws/metrics');
 
         ws.onopen = () => {
             document.getElementById('status').textContent = '已连接';
@@ -832,10 +436,15 @@ const htmlContent = `
 
         // WebSocket 消息处理
         ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            updateConnectionsTable(data);
-            updateSignalList(data.history.signals);
-            updateCharts(data);
+            try {
+                const data = JSON.parse(event.data);
+                if (!totalBandwidthChart) createTotalBandwidthChart();
+                updateTotalBandwidthChart(data);
+                updateStreamCharts(data);
+            } catch (error) {
+                console.error('处理WebSocket消息时出错:', error);
+                console.error('原始消息:', event.data);
+            }
         };
 
         ws.onclose = () => {
@@ -845,8 +454,14 @@ const htmlContent = `
 
         // 窗口大小改变时调整图表大小
         window.addEventListener('resize', () => {
-            Object.values(charts).forEach(chart => chart.resize());
+            Object.values(streamCharts).forEach(chart => chart.resize());
         });
+
+        ws.onerror = (error) => {
+            console.error('WebSocket 连接错误:', error);
+            document.getElementById('status').textContent = '连接错误';
+            document.getElementById('status').className = 'status stopped';
+        };
     </script>
 </body>
 </html>
@@ -855,22 +470,199 @@ const htmlContent = `
 // 写入 HTML 文件
 fs.writeFileSync(path.join(__dirname, 'public', 'index.html'), htmlContent);
 
+// 创建 HTTP 服务器
+const server = app.listen(HTTP_PORT, '0.0.0.0', () => {
+    console.log(`HTTP服务器运行在 http://${localIP}:${HTTP_PORT}`);
+});
+
+// 创建 WebSocket 服务器
+const wss = new WebSocket.Server({ 
+    port: WS_PORT,
+    path: '/ws/metrics'
+});
+
+wss.on('listening', () => {
+    console.log(`WebSocket服务器运行在 ws://${localIP}:${WS_PORT}/ws/metrics`);
+});
+
+// WebSocket 连接处理
+wss.on('connection', (ws, req) => {
+    const clientIP = req.socket.remoteAddress;
+    console.log(`新的监控客户端连接，IP: ${clientIP}`);
+
+    // 检查连接数量限制
+    if (wss.clients.size > MAX_WS_CONNECTIONS) {
+        console.log('达到最大连接数限制，拒绝新连接');
+        ws.close(1008, '达到最大连接数限制');
+        return;
+    }
+
+    // 发送当前完整历史数据给新连接的客户端
+    const fullData = {
+        history: {
+            timestamps: historyData.timestamps.getData(),
+            exchanges: {},
+            signals: historyData.signals.getData()
+        },
+        current: currentExchangeData
+    };
+
+    // 转换历史数据
+    Object.keys(historyData.exchanges).forEach(ex => {
+        fullData.history.exchanges[ex] = {};
+        Object.keys(historyData.exchanges[ex]).forEach(ch => {
+            fullData.history.exchanges[ex][ch] = {
+                msgRates: historyData.exchanges[ex][ch].msgRates.getData(),
+                bytesPerSec: historyData.exchanges[ex][ch].bytesPerSec.getData()
+            };
+        });
+    });
+
+    console.log('发送给新客户端的初始数据:', JSON.stringify(fullData, null, 2));
+
+    try {
+        ws.send(JSON.stringify(fullData));
+        console.log('已发送初始数据到新客户端');
+    } catch (error) {
+        console.error('发送初始数据失败:', error);
+    }
+
+    // 设置心跳检测
+    const heartbeat = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+            try {
+                ws.ping();
+                console.log('发送心跳ping');
+            } catch (error) {
+                console.error('发送心跳失败:', error);
+                clearInterval(heartbeat);
+                ws.terminate();
+            }
+        }
+    }, 30000);
+
+    ws.on('pong', () => {
+        console.log('收到心跳pong响应');
+    });
+
+    ws.on('message', (message) => {
+        try {
+            console.log('收到消息:', message.toString());
+            const stats = JSON.parse(message);
+            if (!stats.exchange || !stats.channel) {
+                console.error('消息缺少必要字段:', stats);
+                return;
+            }
+
+            const exchange = stats.exchange.toString();
+            const channel = stats.channel.toString();
+            
+            console.log(`处理数据: 交易所=${exchange}, 通道=${channel}`);
+            
+            // 记录指标到日志
+            logMetrics(stats);
+            
+            // 更新历史数据
+            const timestamp = new Date(stats.timestamp).toISOString();
+            
+            // 添加时间戳
+            historyData.timestamps.push(timestamp);
+            
+            // 确保数据结构存在
+            if (!historyData.exchanges[exchange]) {
+                historyData.exchanges[exchange] = {};
+            }
+            if (!historyData.exchanges[exchange][channel]) {
+                historyData.exchanges[exchange][channel] = {
+                    msgRates: new CircularBuffer(MAX_DATA_POINTS),
+                    bytesPerSec: new CircularBuffer(MAX_DATA_POINTS)
+                };
+            }
+            
+            // 更新历史数据
+            const msgRate = Math.round(stats.msg_sec || 0);
+            const bytesPerSec = Math.round(stats.bytes_sec || 0);
+            
+            historyData.exchanges[exchange][channel].msgRates.push(msgRate);
+            historyData.exchanges[exchange][channel].bytesPerSec.push(bytesPerSec);
+
+            // 更新当前数据
+            if (!currentExchangeData[exchange]) {
+                currentExchangeData[exchange] = {};
+            }
+            if (!currentExchangeData[exchange][channel]) {
+                currentExchangeData[exchange][channel] = {
+                    msg_rate: msgRate,
+                    bytes_per_sec: bytesPerSec,
+                    status: stats.status || 'running',
+                    signal_type: stats.signal_type || 'periodic',
+                    timestamp: timestamp
+                };
+            }
+
+            // 如果收到信号，添加到信号列表
+            if (stats.signal_type && stats.signal_type !== 'periodic') {
+                historyData.signals.push({
+                    time: timestamp,
+                    type: stats.signal_type,
+                    exchange: exchange,
+                    channel: channel
+                });
+                console.log('添加新信号:', stats.signal_type);
+            }
+
+            // 只发送更新的数据给当前客户端
+            const updateData = {
+                history: {
+                    timestamps: historyData.timestamps.getData(),
+                    exchanges: historyData.exchanges,
+                    signals: historyData.signals.getData()
+                }
+            };
+
+            // 只发送给当前连接的客户端
+            if (ws.readyState === WebSocket.OPEN) {
+                try {
+                    ws.send(JSON.stringify(updateData));
+                    console.log(`数据已发送到客户端`);
+                } catch (error) {
+                    console.error('发送数据到客户端失败:', error);
+                }
+            }
+
+        } catch (error) {
+            console.error('处理消息失败:', error);
+            console.error('原始消息:', message.toString());
+        }
+    });
+
+    ws.on('close', (code, reason) => {
+        console.log(`监控客户端断开连接, 代码: ${code}, 原因: ${reason}`);
+        clearInterval(heartbeat);
+    });
+
+    ws.on('error', (error) => {
+        console.error('WebSocket 连接错误:', error);
+        clearInterval(heartbeat);
+        // 只关闭出错的连接，而不是整个服务器
+        ws.terminate();
+    });
+});
+
+// 定期打印连接状态
+setInterval(() => {
+    console.log(`当前WebSocket连接数: ${wss.clients.size}`);
+}, 30000);
+
+// 加载历史数据
+loadHistoryData();
+
 // 清理函数
 function cleanup() {
     console.log('正在清理资源...');
     
     // 保存当前数据
     saveHistoryData();
-    
-    // 清理日志文件
-    try {
-        if (fs.existsSync(LOG_FILE)) {
-            fs.unlinkSync(LOG_FILE);
-            console.log('已删除日志文件:', LOG_FILE);
-        }
-    } catch (error) {
-        console.error('删除日志文件失败:', error);
-    }
     
     // 关闭WebSocket服务器
     wss.close(() => {
@@ -886,15 +678,18 @@ function cleanup() {
 // 处理未捕获的异常
 process.on('uncaughtException', (error) => {
     console.error('未捕获的异常:', error);
-    cleanup();
-    process.exit(1);
+    // 只有在严重错误时才触发清理
+    if (error.code === 'EADDRINUSE' || error.code === 'EACCES') {
+        cleanup();
+        process.exit(1);
+    }
 });
 
 // 处理未处理的Promise拒绝
 process.on('unhandledRejection', (reason, promise) => {
     console.error('未处理的Promise拒绝:', reason);
-    cleanup();
-    process.exit(1);
+    // 记录错误但不立即退出
+    console.error('Promise:', promise);
 });
 
 // 处理进程退出
