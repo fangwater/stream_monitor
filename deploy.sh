@@ -131,8 +131,10 @@ After=network.target
 User=$USER_NAME
 WorkingDirectory=$WORKING_DIR
 Environment="NODE_OPTIONS=--max-old-space-size=2048"
-ExecStart=$NODE_PATH $MONITOR_SCRIPT >> $LOG_DIR/output.log 2>> $LOG_DIR/error.log
+ExecStart=$NODE_PATH $MONITOR_SCRIPT
 ExecStartPre=$LOG_MANAGER_SCRIPT
+StandardOutput=file:$LOG_DIR/output.log
+StandardError=file:$LOG_DIR/error.log
 Restart=on-failure
 RestartSec=10
 StartLimitInterval=60

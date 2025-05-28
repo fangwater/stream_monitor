@@ -1,6 +1,6 @@
 #!/bin/bash
 
-WORKING_DIR="/root/project/stream_monitor"
+WORKING_DIR="/home/crypto_mkt/stream_monitor"
 LOG_DIR="$WORKING_DIR"
 ARCHIVE_DIR="$WORKING_DIR"
 

@@ -2,4 +2,5 @@ monitor.log
 node_modules
 data
 package-lock.json
-
+*.log
+logs*
